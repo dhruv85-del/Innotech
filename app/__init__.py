@@ -1,0 +1,1 @@
+"""IBVAP video analytics service."""
