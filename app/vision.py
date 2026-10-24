@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import shutil
+import re
 
 import cv2
 import numpy as np
@@ -170,32 +172,74 @@ class PlateReader:
         frame: np.ndarray,
         detection: Detection,
         minimum_confidence: float = 0.5,
+        plate_pattern: str | None = None,
     ) -> tuple[str, float] | None:
         x1, y1, x2, y2 = (int(value) for value in detection.xyxy)
+        height, width = frame.shape[:2]
+        padding_x = max(2, round((x2 - x1) * 0.12))
+        padding_y = max(2, round((y2 - y1) * 0.35))
+        x1 = max(0, x1 - padding_x)
+        y1 = max(0, y1 - padding_y)
+        x2 = min(width, x2 + padding_x)
+        y2 = min(height, y2 + padding_y)
         crop = frame[y1:y2, x1:x2]
         if crop.size == 0:
             return None
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-        result = self.pytesseract.image_to_data(
+        gray = cv2.resize(gray, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+        denoised = cv2.bilateralFilter(clahe, 5, 40, 40)
+        variants = [
             gray,
-            config="--psm 7",
-            output_type=self.pytesseract.Output.DICT,
+            clahe,
+            denoised,
+            cv2.normalize(denoised, None, 0, 255, cv2.NORM_MINMAX),
+            cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+            cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1],
+            cv2.adaptiveThreshold(
+                denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 7
+            ),
+        ]
+        candidates: list[tuple[str, float]] = []
+        for variant in variants:
+            for page_mode in (6, 7, 8, 13):
+                result = self.pytesseract.image_to_data(
+                    variant,
+                    config=(
+                        f"--psm {page_mode} "
+                        "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+                    ),
+                    output_type=self.pytesseract.Output.DICT,
+                )
+                text_parts: list[str] = []
+                scores: list[float] = []
+                for text, confidence in zip(result["text"], result["conf"]):
+                    cleaned = re.sub(r"[^A-Z0-9]", "", text.upper())
+                    try:
+                        score = float(confidence) / 100
+                    except (TypeError, ValueError):
+                        continue
+                    if cleaned and score >= minimum_confidence and score >= 0:
+                        text_parts.append(cleaned)
+                        scores.append(score)
+                if text_parts:
+                    candidates.append(("".join(text_parts), sum(scores) / len(scores)))
+        if not candidates:
+            return None
+        valid = [
+            candidate for candidate in candidates
+            if plate_pattern is None or re.fullmatch(plate_pattern, candidate[0])
+        ]
+        if plate_pattern is not None and not valid:
+            return None
+        selected = max(
+            valid or candidates,
+            key=lambda candidate: (
+                bool(plate_pattern and re.fullmatch(plate_pattern, candidate[0])),
+                candidate[1],
+                len(candidate[0]),
+            ),
         )
-        words: list[str] = []
-        confidences: list[float] = []
-        for text, confidence in zip(result["text"], result["conf"]):
-            cleaned = "".join(char for char in text.upper() if char.isalnum())
-            try:
-                score = float(confidence) / 100
-            except (TypeError, ValueError):
-                continue
-            if cleaned and score >= minimum_confidence:
-                words.append(cleaned)
-                confidences.append(score)
-        if not words:
+        if selected[1] < minimum_confidence:
             return None
-        confidence = sum(confidences) / len(confidences)
-        if confidence < minimum_confidence:
-            return None
-        return "".join(words), confidence
+        return selected

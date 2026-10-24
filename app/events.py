@@ -3,7 +3,7 @@ from contextlib import closing
 import sqlite3
 import threading
 
-from app.schemas import AnalyticsEvent
+from app.schemas import AlertAction, AnalyticsEvent
 
 
 class EventStore:
@@ -43,6 +43,15 @@ class EventStore:
                 )
                 connection.execute(
                     "CREATE INDEX IF NOT EXISTS idx_events_time ON events(occurred_at)"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS alert_actions (
+                        event_id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL CHECK(status IN ('Acknowledged', 'Dismissed')),
+                        acted_at TEXT NOT NULL
+                    )
+                    """
                 )
                 connection.execute(
                     "DELETE FROM events WHERE occurred_at < ?",
@@ -111,3 +120,40 @@ class EventStore:
                 params,
             ).fetchall()
         return [AnalyticsEvent.model_validate_json(row["payload"]) for row in rows]
+
+    def get(self, event_id: str) -> AnalyticsEvent | None:
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT payload FROM events WHERE event_id = ?", (event_id,)
+            ).fetchone()
+        return AnalyticsEvent.model_validate_json(row["payload"]) if row else None
+
+    def list_alert_actions(self, limit: int = 1000) -> list[AlertAction]:
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT event_id, status, acted_at FROM alert_actions ORDER BY acted_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [AlertAction.model_validate(dict(row)) for row in rows]
+
+    def record_alert_action(self, event_id: str, status: str) -> AlertAction:
+        if status not in {"Acknowledged", "Dismissed"}:
+            raise ValueError("status must be Acknowledged or Dismissed")
+        acted_at = datetime.now(timezone.utc)
+        action = AlertAction(event_id=event_id, status=status, acted_at=acted_at)
+        with self._lock, closing(self._connect()) as connection:
+            with connection:
+                event_exists = connection.execute(
+                    "SELECT 1 FROM events WHERE event_id = ?", (event_id,)
+                ).fetchone()
+                if event_exists is None:
+                    raise KeyError(event_id)
+                connection.execute(
+                    """
+                    INSERT INTO alert_actions(event_id, status, acted_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(event_id) DO UPDATE SET status = excluded.status, acted_at = excluded.acted_at
+                    """,
+                    (event_id, action.status, action.acted_at.isoformat()),
+                )
+        return action

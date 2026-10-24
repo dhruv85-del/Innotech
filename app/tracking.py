@@ -61,7 +61,7 @@ class ByteTrackAdapter:
             if not candidates:
                 continue
             candidate_index, overlap = max(candidates, key=lambda candidate: candidate[1])
-            if overlap < 0.99:
+            if overlap < 0.5:
                 continue
             used_indices.add(candidate_index)
             result.append(TrackedDetection(detections[candidate_index], int(track_id)))

@@ -30,6 +30,13 @@ export type AnalyticsEvent = {
   zone_id: string | null
   object: { class_name: string; confidence: number | null } | null
   details: Record<string, string | number | boolean | null>
+  evidence: { snapshot_reference: string | null }
+}
+
+export type AlertAction = {
+  event_id: string
+  status: 'Acknowledged' | 'Dismissed'
+  acted_at: string
 }
 
 export type ImageAnalysisResult = {
@@ -44,6 +51,9 @@ export type ImageAnalysisResult = {
     plate_text: string | null
     ocr_confidence: number | null
   }>
+  report_id: string | null
+  report_download_reference: string | null
+  activity_predictions: Array<{ activity: string; confidence: number | null; evidence: string }>
 }
 
 export type VideoAnalysisResult = {
@@ -51,6 +61,9 @@ export type VideoAnalysisResult = {
   filename: string
   frames_analyzed: number
   events: AnalyticsEvent[]
+  activity_predictions: Array<{ activity: string; confidence: number | null; evidence: string }>
+  report_id: string | null
+  report_download_reference: string | null
 }
 
 export class ApiError extends Error {
@@ -81,7 +94,34 @@ export const api = {
   readiness: (token: string) => request<Readiness>('/ready', {}, token),
   cameras: (token: string) => request<CameraStatus[]>('/api/v1/cameras', {}, token),
   metrics: (token: string) => request<CameraMetrics[]>('/api/v1/metrics/cameras', {}, token),
-  events: (token: string) => request<AnalyticsEvent[]>('/api/v1/events?limit=100', {}, token),
+  events: (token: string) => request<AnalyticsEvent[]>('/api/v1/events?limit=1000', {}, token),
+  alertActions: (token: string) => request<AlertAction[]>('/api/v1/alert-actions', {}, token),
+  recordAlertAction: (token: string, eventId: string, status: AlertAction['status']) =>
+    request<AlertAction>(`/api/v1/events/${encodeURIComponent(eventId)}/action`, {
+      method: 'POST',
+      body: JSON.stringify({ event_id: eventId, status, acted_at: new Date().toISOString() }),
+    }, token),
+  eventSnapshot: async (token: string, eventId: string) => {
+    const response = await fetch(`/api/v1/events/${encodeURIComponent(eventId)}/snapshot`, {
+      headers: { 'X-API-Key': token },
+    })
+    if (!response.ok) throw new ApiError(response.status, 'Snapshot unavailable')
+    return response.blob()
+  },
+  imageReport: async (token: string, reportId: string) => {
+    const response = await fetch(`/api/v1/image-reports/${encodeURIComponent(reportId)}/download`, {
+      headers: { 'X-API-Key': token },
+    })
+    if (!response.ok) throw new ApiError(response.status, 'Image report unavailable')
+    return response.blob()
+  },
+  videoReport: async (token: string, reportId: string) => {
+    const response = await fetch(`/api/v1/video-reports/${encodeURIComponent(reportId)}/download`, {
+      headers: { 'X-API-Key': token },
+    })
+    if (!response.ok) throw new ApiError(response.status, 'Video report unavailable')
+    return response.blob()
+  },
   createCamera: (token: string, body: { camera_id: string; source: string; analytics: string[]; start: boolean }) =>
     request<CameraStatus>('/api/v1/cameras', { method: 'POST', body: JSON.stringify(body) }, token),
   updateCamera: (token: string, cameraId: string, body: { analytics?: string[]; process_fps?: number }) =>

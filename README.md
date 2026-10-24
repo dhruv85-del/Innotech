@@ -2,6 +2,10 @@
 
 This repository contains the first runnable AI-service phase described in [AI_SERVICE_PHASE.md](./AI_SERVICE_PHASE.md). It is a local, separately deployable FastAPI service for camera stream decoding, on-premises inference, tracking, basic configurable events, and event logging.
 
+For a code-grounded visual explanation of the runtime components, live camera
+pipeline, upload paths, dashboard polling, and storage lifecycle, see
+[ARCHITECTURE.md](./ARCHITECTURE.md).
+
 ## Current capability and limits
 
 - RTSP/RTSPS stream workers are isolated per camera and reconnect after stream failures.
@@ -11,7 +15,10 @@ This repository contains the first runnable AI-service phase described in [AI_SE
 - Virtual-fence entry, zone loitering (zone override or service default), and configured-UTC-hour night movement are implemented as deterministic rules. A confidence threshold or rule event is not a guarantee of detection.
 - Events are persisted in SQLite with a configurable 30-day default retention (`IBVAP_EVENT_RETENTION_DAYS`); expiry is enforced at startup, event cleanup batches, and event queries. The API offers polling; no command-center connector or event push delivery is configured yet.
 - Camera configurations and worker state are in memory and must be registered again after a service restart; stream credentials are not written to the database.
-- Video frames and snapshots are not persisted. Plate text is included in `plate_read` event details and must be protected and retained according to the deployment's policy.
+- Video frames are not persisted, but event JPEG snapshots are retained internally as evidence. Plate text is included in `plate_read` event details and must be protected and retained according to the deployment's policy.
+- Image and video analysis reports include detected vehicle numbers and OCR confidence. CSV alert exports expose vehicle number and OCR confidence as dedicated columns. If OCR does not produce an accepted result, reports state `Vehicle number not captured`.
+- ANPR preprocessing uses multiple scaled/thresholded crops and Tesseract page modes with an alphanumeric whitelist. Plate text is validated against `IBVAP_PLATE_PATTERN`, which defaults to a broad Indian registration format and can be customized.
+- Reports embed the annotated image for image analysis and available event snapshots for video analysis. The vehicle-registry adapter is disabled until an authorized API is configured; it does not infer owner details from a plate.
 
 The service intentionally has no face-recognition, biometric matching, watchlist, or identity lookup capability. Alerts are advisory and require human review.
 
@@ -91,13 +98,23 @@ Other useful calls:
 - `PATCH /api/v1/cameras/{camera_id}` (camera must be stopped)
 - `GET /api/v1/cameras`
 - `GET /api/v1/events?camera_id=bop-gate-01&limit=100`
+- `GET /api/v1/events/{event_id}/snapshot` (authenticated event evidence image)
 - `GET /api/v1/metrics/cameras`
+- `POST /api/v1/videos/analyze` (authenticated multipart upload, maximum 250 MiB)
 
 ## Sample-image demo
 
 The image-analysis page at `http://127.0.0.1:8000/` offers upload, analytics selection, and annotated detection results. It calls the authenticated `POST /api/v1/images/analyze` endpoint and keeps the API token in page memory only. The endpoint accepts one image upload for demonstrations when a live camera or video clip is unavailable. Select one or more analytics: `person_vehicle`, `face`, or `anpr`. The response contains image dimensions and normalized detection boxes; ANPR results include OCR text only when it meets the configured confidence floor. Images are processed in memory and are not saved, and this endpoint does not create event records.
 
 The endpoint requires the corresponding configured model/runtime. Person and vehicle detection needs `IBVAP_PERSON_VEHICLE_MODEL`; ANPR additionally needs `IBVAP_PLATE_MODEL` and Tesseract. Uploads are limited to 10 MiB and decoded images to 25 megapixels. Sample images can demonstrate per-image detections, but cannot validate tracking, loitering duration, night movement, live-stream reliability, or real-world accuracy. Label demo inputs and results as illustrative, not operationally validated.
+
+After image analysis, the service creates a standalone HTML report with the annotated image, detected classes, confidence scores, plate text, and OCR confidence. The response includes a report ID and authenticated download reference, and the React upload page provides a **Download detailed report** button. The report does not infer identities or claim that a detected person is inside a vehicle unless a future model explicitly supports that relationship.
+
+Uploaded video analysis uses the same configured detectors and rule engine as a temporary camera pipeline. It samples frames at the configured processing rate, returns generated events, and does not retain the uploaded video. Video uploads are limited to 250 MiB; use licensed test clips because this route is a validation/demo tool, not a substitute for live-stream qualification.
+
+Video analysis also creates a downloadable HTML report. The report lists every detected activity/event, vehicle number, OCR confidence, event time, and a dedicated vehicle plate readings section. If a plate is not detected or accepted by OCR, the report explicitly states **Vehicle number not captured**. The video response includes a report download reference.
+
+When `anpr` is enabled with a compatible plate model and Tesseract, recognized plate text and OCR confidence are included in `plate_read` events. The report displays the plate text, detected vehicle/object, confidence, zone, and event status. Plate OCR is advisory and must be validated against the target jurisdiction, camera angles, lighting, and vehicle speeds.
 
 Camera processing metrics are available through the authenticated `GET /api/v1/metrics/cameras` endpoint. They report processed/dropped frames and inference timing per registered camera; they are observational metrics, not a capacity guarantee.
 

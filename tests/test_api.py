@@ -135,3 +135,30 @@ def test_service_api_requires_configured_token(tmp_path) -> None:
         response = client.get("/api/v1/cameras")
 
     assert response.status_code == 503
+
+
+def test_ui_route_serves_frontend(tmp_path) -> None:
+    settings = Settings(
+        database_path=str(tmp_path / "events.sqlite3"),
+        event_retention_days=30,
+        person_vehicle_model=None,
+        plate_model=None,
+        face_cascade_path=None,
+        inference_provider="CPUExecutionProvider",
+        inference_size=640,
+        confidence_threshold=0.35,
+        nms_threshold=0.45,
+        anpr_min_ocr_confidence=0.5,
+        process_fps=5,
+        loiter_seconds=30,
+        event_cooldown_seconds=30,
+        night_start_hour=20,
+        night_end_hour=6,
+        allow_file_sources=True,
+        tesseract_cmd=None,
+        api_token="test-token-for-unit-tests-not-production-1234",
+    )
+    with TestClient(create_app(settings)) as client:
+        res = client.get("/ui")
+        assert res.status_code == 200
+        assert "IBVAP" in res.text

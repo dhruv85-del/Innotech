@@ -143,6 +143,12 @@ class CameraMetrics(BaseModel):
     average_inference_ms: float = 0
 
 
+class ActivityPrediction(BaseModel):
+    activity: str
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    evidence: str
+
+
 class BoundingBox(BaseModel):
     x: float = Field(ge=0, le=1)
     y: float = Field(ge=0, le=1)
@@ -168,6 +174,12 @@ class AnalyticsEvent(BaseModel):
     evidence: dict[str, str | None] = Field(default_factory=lambda: {"snapshot_reference": None})
 
 
+class AlertAction(BaseModel):
+    event_id: str
+    status: Literal["Acknowledged", "Dismissed"]
+    acted_at: datetime
+
+
 class ImageDetection(BaseModel):
     class_name: str
     confidence: float | None = Field(default=None, ge=0, le=1)
@@ -182,6 +194,9 @@ class ImageAnalysisResult(BaseModel):
     image_height: int = Field(gt=0)
     analytics: list[str]
     detections: list[ImageDetection]
+    report_id: str | None = None
+    report_download_reference: str | None = None
+    activity_predictions: list[ActivityPrediction] = Field(default_factory=list)
 
 
 class VideoAnalysisResult(BaseModel):
@@ -189,6 +204,9 @@ class VideoAnalysisResult(BaseModel):
     filename: str
     frames_analyzed: int
     events: list[AnalyticsEvent]
+    activity_predictions: list[ActivityPrediction] = Field(default_factory=list)
+    report_id: str | None = None
+    report_download_reference: str | None = None
 
 
 class Readiness(BaseModel):

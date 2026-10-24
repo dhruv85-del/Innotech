@@ -1,5 +1,16 @@
 from dataclasses import dataclass
 import os
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    _env_path = Path(__file__).resolve().parent.parent / ".env"
+    if _env_path.is_file():
+        load_dotenv(dotenv_path=_env_path, override=False)
+except ImportError:
+    pass
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -29,6 +40,7 @@ class Settings:
     allow_file_sources: bool
     tesseract_cmd: str | None
     api_token: str | None
+    plate_pattern: str = r"^[A-Z]{2}[0-9]{1,2}[A-Z]{0,3}[0-9]{1,4}$"
 
     def __post_init__(self) -> None:
         if self.inference_size <= 0:
@@ -63,6 +75,10 @@ class Settings:
             confidence_threshold=float(os.getenv("IBVAP_CONFIDENCE_THRESHOLD", "0.35")),
             nms_threshold=float(os.getenv("IBVAP_NMS_THRESHOLD", "0.45")),
             anpr_min_ocr_confidence=float(os.getenv("IBVAP_ANPR_MIN_OCR_CONFIDENCE", "0.5")),
+            plate_pattern=os.getenv(
+                "IBVAP_PLATE_PATTERN",
+                r"^[A-Z]{2}[0-9]{1,2}[A-Z]{0,3}[0-9]{1,4}$",
+            ),
             process_fps=float(os.getenv("IBVAP_PROCESS_FPS", "5")),
             loiter_seconds=float(os.getenv("IBVAP_LOITER_SECONDS", "30")),
             event_cooldown_seconds=float(os.getenv("IBVAP_EVENT_COOLDOWN_SECONDS", "30")),

@@ -5,8 +5,7 @@ import { useAppContext } from '../App'
 import { PageTitle, SearchField, SelectField, StatusBadge } from '../components/Primitives'
 
 export function AlertsPage() {
-  const { events } = useAppContext()
-  const [statuses, setStatuses] = useState<Record<string, AlertItem['status']>>({})
+  const { events, alertActions, recordAlertAction } = useAppContext()
   const alerts: AlertItem[] = events.map((event) => ({
     id: event.event_id,
     title: event.event_type.replace(/_/g, ' '),
@@ -15,14 +14,16 @@ export function AlertsPage() {
     location: event.camera_id,
     time: new Date(event.occurred_at).toLocaleString(),
     severity: event.event_type.includes('intrusion') ? 'Critical' : 'Medium',
-    status: statuses[event.event_id] ?? 'New',
+    status: alertActions.find((action) => action.event_id === event.event_id)?.status ?? 'New',
   }))
   const [search, setSearch] = useState('')
   const [severity, setSeverity] = useState('All severity')
   const [status, setStatus] = useState('All alerts')
   const filtered = useMemo(() => alerts.filter((alert) => `${alert.title} ${alert.media} ${alert.location}`.toLowerCase().includes(search.toLowerCase()) && (severity === 'All severity' || alert.severity === severity) && (status === 'All alerts' || alert.status === status)), [alerts, search, severity, status])
-  const updateAlert = (id: string, nextStatus: AlertItem['status']) => setStatuses((current) => ({ ...current, [id]: nextStatus }))
-  const dismissAll = () => setStatuses(Object.fromEntries(alerts.filter((alert) => alert.status === 'New').map((alert) => [alert.id, 'Dismissed' as const])))
+  const updateAlert = async (id: string, nextStatus: AlertItem['status']) => {
+    if (nextStatus === 'Acknowledged' || nextStatus === 'Dismissed') await recordAlertAction(id, nextStatus)
+  }
+  const dismissAll = () => Promise.all(alerts.filter((alert) => alert.status === 'New').map((alert) => recordAlertAction(alert.id, 'Dismissed')))
   return <div className="page">
     <PageTitle eyebrow="MANUAL REVIEW" title="Alerts" description="Review flagged items linked to uploaded videos and images." action={<button className="button button-secondary" onClick={dismissAll}><CheckCheck size={15} /> Clear new alerts</button>} />
     <section className="stats-grid compact-stats alert-stats"><article className="stat-card compact-stat"><span className="stat-label">New alerts</span><strong className="red-text">{alerts.filter((alert) => alert.status === 'New').length.toString().padStart(2, '0')}</strong><span className="compact-stat-note">Require your attention</span></article><article className="stat-card compact-stat"><span className="stat-label">Critical & high</span><strong className="amber-text">{alerts.filter((alert) => ['Critical', 'High'].includes(alert.severity) && alert.status !== 'Dismissed').length.toString().padStart(2, '0')}</strong><span className="compact-stat-note">Priority incidents</span></article><article className="stat-card compact-stat"><span className="stat-label">Acknowledged</span><strong className="cyan-text">{alerts.filter((alert) => alert.status === 'Acknowledged').length.toString().padStart(2, '0')}</strong><span className="compact-stat-note">Being investigated</span></article><article className="stat-card compact-stat"><span className="stat-label">Dismissed</span><strong>{alerts.filter((alert) => alert.status === 'Dismissed').length.toString().padStart(2, '0')}</strong><span className="compact-stat-note">Closed alerts</span></article></section>

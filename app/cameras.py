@@ -24,6 +24,7 @@ from app.schemas import (
     EventObject,
     ImageAnalysisResult,
     ImageDetection,
+    ActivityPrediction,
     VideoAnalysisResult,
 )
 from app.tracking import ByteTrackAdapter
@@ -136,6 +137,8 @@ class CameraManager:
         self._lock = threading.RLock()
         self._model_lock = threading.Lock()
         self._detectors: dict[str, YoloOnnxDetector] = {}
+        self._evidence_directory = Path(settings.database_path).parent / "evidence"
+        self._evidence_directory.mkdir(parents=True, exist_ok=True)
 
     def capabilities(self) -> tuple[dict[str, bool], list[str]]:
         try:
@@ -338,30 +341,65 @@ class CameraManager:
                     frame,
                     detection,
                     minimum_confidence=self.settings.anpr_min_ocr_confidence,
+                    plate_pattern=self.settings.plate_pattern,
                 )
                 plate_text, ocr_confidence = recognized if recognized is not None else (None, None)
                 detections.append(
                     _image_detection(detection, width, height, plate_text, ocr_confidence)
                 )
+        activity_predictions: list[ActivityPrediction] = []
+        people = [detection for detection in detections if detection.class_name == "person"]
+        vehicles = [detection for detection in detections if detection.class_name in VEHICLE_CLASS_IDS.values()]
+        if people:
+            activity_predictions.append(ActivityPrediction(activity="person_present", confidence=max((item.confidence or 0) for item in people), evidence=f"{len(people)} person detection(s)"))
+        if vehicles:
+            activity_predictions.append(ActivityPrediction(activity="vehicle_present", confidence=max((item.confidence or 0) for item in vehicles), evidence=f"{len(vehicles)} vehicle detection(s)"))
+        if len(people) >= 3:
+            activity_predictions.append(ActivityPrediction(activity="crowding", confidence=None, evidence=f"{len(people)} people detected in one image"))
         return ImageAnalysisResult(
             analyzed_at=datetime.now(timezone.utc),
             image_width=width,
             image_height=height,
             analytics=sorted(analytics),
             detections=detections,
+            activity_predictions=activity_predictions,
         )
 
-    def analyze_video(self, video_bytes: bytes, filename: str, analytics: set[str]) -> VideoAnalysisResult:
+    def analyze_video(
+        self,
+        video_bytes: bytes,
+        filename: str,
+        analytics: set[str],
+        zones: list[Any] | None = None,
+    ) -> VideoAnalysisResult:
         if not video_bytes:
             raise ValueError("uploaded video is empty")
         if not analytics:
             raise ValueError("select at least one video analytics capability")
         self._validate_analytics_capabilities(analytics)
+        from app.schemas import Point, ZoneConfig
+
+        camera_zones: list[ZoneConfig] = list(zones) if zones else []
+        if not camera_zones and (analytics & {"intrusion", "loitering"}):
+            camera_zones = [
+                ZoneConfig(
+                    zone_id="perimeter-zone",
+                    polygon=[
+                        Point(x=0.05, y=0.15),
+                        Point(x=0.95, y=0.15),
+                        Point(x=0.95, y=0.95),
+                        Point(x=0.05, y=0.95),
+                    ],
+                    restricted=True,
+                    loiter_seconds=min(5.0, self.settings.loiter_seconds),
+                )
+            ]
         camera = CameraRuntime(
             CameraCreate(
                 camera_id=f"upload-{uuid4().hex[:12]}",
                 source="uploaded-video",
                 analytics=analytics,
+                zones=camera_zones,
                 process_fps=self.settings.process_fps,
             )
         )
@@ -391,11 +429,13 @@ class CameraManager:
                 self._process_frame(camera, frame, tracker, rule_state, person_detector, face_detector, plate_detector, plate_reader)
                 frames_analyzed += 1
             capture.release()
+            events = _aggregate_plate_events(self.events.query(camera_id=camera.camera_id, limit=1000))
             return VideoAnalysisResult(
                 analyzed_at=datetime.now(timezone.utc),
                 filename=filename,
                 frames_analyzed=frames_analyzed,
-                events=self.events.query(camera_id=camera.camera_id, limit=1000),
+                events=events,
+                activity_predictions=_video_activity_predictions(events),
             )
         finally:
             if "video_path" in locals():
@@ -528,6 +568,9 @@ class CameraManager:
                 capture.release()
                 capture = None
                 if stream_failed and not camera.stop_event.is_set():
+                    if self._is_file_source(camera.source) and camera.processed_frames > 0:
+                        camera.stop_event.wait(0.5)
+                        continue
                     if self._is_file_source(camera.source):
                         with camera.lock:
                             camera.state = CameraState.stopped
@@ -571,8 +614,13 @@ class CameraManager:
         now = datetime.now(timezone.utc)
         detections = person_detector.detect(frame) if person_detector else []
         tracked = tracker.update(detections) if person_detector else []
+        person_count = sum(item.detection.class_name == "person" for item in tracked)
+        if person_count >= 3 and rule_state.should_emit(
+            "crowding", "camera", "crowding", now, self.settings.event_cooldown_seconds
+        ):
+            self._emit_activity(camera, "crowding", now, width, height, {"person_count": person_count})
         for item in tracked:
-            self._process_tracked_detection(camera, item.detection, str(item.track_id), width, height, now, rule_state)
+            self._process_tracked_detection(camera, frame, item.detection, str(item.track_id), width, height, now, rule_state)
         if face_detector:
             for face in face_detector.detect(frame):
                 if rule_state.should_emit("face_detected", "camera", "face", now, self.settings.event_cooldown_seconds):
@@ -583,6 +631,7 @@ class CameraManager:
                         face,
                         width,
                         height,
+                        frame=frame,
                         details={"method": "haar_cascade"},
                     )
         if plate_detector and plate_reader:
@@ -591,6 +640,7 @@ class CameraManager:
                     frame,
                     plate,
                     minimum_confidence=self.settings.anpr_min_ocr_confidence,
+                    plate_pattern=self.settings.plate_pattern,
                 )
                 if recognized is None:
                     continue
@@ -603,12 +653,14 @@ class CameraManager:
                         plate,
                         width,
                         height,
+                        frame=frame,
                         details={"plate_text": text, "ocr_confidence": confidence},
                     )
 
     def _process_tracked_detection(
         self,
         camera: CameraRuntime,
+        frame: np.ndarray,
         detection: Detection,
         track_id: str,
         width: int,
@@ -621,14 +673,14 @@ class CameraManager:
         if "person_vehicle" in camera.analytics and state.should_emit(
             "object_detected", track_id, "object", now, self.settings.event_cooldown_seconds
         ):
-            self._emit(camera, "object_detected", now, detection, width, height, track_id=track_id)
+            self._emit(camera, "object_detected", now, detection, width, height, track_id=track_id, frame=frame)
         for zone in camera.zones:
             inside = detection_center_in_zone(detection, width, height, zone)
             key = (track_id, zone.zone_id)
             if zone.restricted and "intrusion" in camera.analytics:
                 if inside and key not in state.zone_entry:
                     state.zone_entry.add(key)
-                    self._emit(camera, "virtual_fence_intrusion", now, detection, width, height, track_id, zone.zone_id)
+                    self._emit(camera, "virtual_fence_intrusion", now, detection, width, height, track_id, zone.zone_id, frame)
                 elif not inside:
                     state.zone_entry.discard(key)
             if "loitering" in camera.analytics:
@@ -638,12 +690,41 @@ class CameraManager:
                     if (now - since).total_seconds() >= loiter_seconds and state.should_emit(
                         "loitering", track_id, zone.zone_id, now, self.settings.event_cooldown_seconds
                     ):
-                        self._emit(camera, "loitering", now, detection, width, height, track_id, zone.zone_id)
+                        self._emit(camera, "loitering", now, detection, width, height, track_id, zone.zone_id, frame)
                 else:
                     state.loiter_since.pop(key, None)
         if "night_movement" in camera.analytics and self._is_night(now):
             if state.should_emit("night_movement", track_id, "night", now, self.settings.event_cooldown_seconds):
-                self._emit(camera, "night_movement", now, detection, width, height, track_id=track_id)
+                self._emit(camera, "night_movement", now, detection, width, height, track_id=track_id, frame=frame)
+        if detection.class_name in VEHICLE_CLASS_IDS.values():
+            center = ((detection.xyxy[0] + detection.xyxy[2]) / 2, (detection.xyxy[1] + detection.xyxy[3]) / 2)
+            previous = state.last_centers.get(track_id)
+            state.last_centers[track_id] = center
+            if previous is not None and abs(center[0] - previous[0]) + abs(center[1] - previous[1]) <= 5:
+                since = state.stationary_since.setdefault(track_id, now)
+                if (now - since).total_seconds() >= 10 and state.should_emit(
+                    "stopped_vehicle", track_id, "vehicle", now, self.settings.event_cooldown_seconds
+                ):
+                    self._emit(camera, "stopped_vehicle", now, detection, width, height, track_id=track_id, frame=frame)
+            else:
+                state.stationary_since.pop(track_id, None)
+
+    def _emit_activity(
+        self,
+        camera: CameraRuntime,
+        activity: str,
+        now: datetime,
+        width: int,
+        height: int,
+        details: dict[str, int],
+    ) -> None:
+        self.events.publish(AnalyticsEvent(
+            event_id=str(uuid4()),
+            event_type=activity,
+            occurred_at=now,
+            camera_id=camera.camera_id,
+            details=details,
+        ))
 
     def _is_night(self, now: datetime) -> bool:
         hour = now.hour
@@ -660,11 +741,55 @@ class CameraManager:
         height: int,
         track_id: str | None = None,
         zone_id: str | None = None,
+        frame: np.ndarray | None = None,
         details: dict[str, str | float | int | bool | None] | None = None,
     ) -> None:
+        event_id = str(uuid4())
+        evidence: dict[str, str | None] = {"snapshot_reference": None}
+        event_details = dict(details or {})
+        if frame is not None:
+            snapshot_path = self._evidence_directory / f"{event_id}.jpg"
+            try:
+                annotated = frame.copy()
+                x1, y1, x2, y2 = (int(value) for value in detection.xyxy)
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (249, 0, 213), 2)
+                label = detection.class_name
+                plate_text = event_details.get("plate_text")
+                if plate_text:
+                    label = f"{label}: {plate_text}"
+                cv2.putText(
+                    annotated,
+                    label,
+                    (x1, max(20, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (249, 0, 213),
+                    2,
+                )
+                if cv2.imwrite(str(snapshot_path), annotated):
+                    evidence["snapshot_reference"] = f"/api/v1/events/{event_id}/snapshot"
+                else:
+                    logger.error("Could not write evidence snapshot for event_id=%s", event_id)
+                if event_type == "plate_read":
+                    padding_x = max(2, round((x2 - x1) * 0.12))
+                    padding_y = max(2, round((y2 - y1) * 0.35))
+                    crop = frame[
+                        max(0, y1 - padding_y) : min(height, y2 + padding_y),
+                        max(0, x1 - padding_x) : min(width, x2 + padding_x),
+                    ]
+                    plate_snapshot_path = self._evidence_directory / f"{event_id}_plate.jpg"
+                    if crop.size and cv2.imwrite(str(plate_snapshot_path), crop):
+                        evidence["plate_snapshot_reference"] = (
+                            f"/api/v1/events/{event_id}/plate-snapshot"
+                        )
+                        event_details["plate_snapshot_reference"] = evidence["plate_snapshot_reference"]
+                    else:
+                        logger.error("Could not write plate snapshot for event_id=%s", event_id)
+            except (OSError, cv2.error) as exc:
+                logger.error("Evidence snapshot failed for event_id=%s error_type=%s", event_id, type(exc).__name__)
         self.events.publish(
             AnalyticsEvent(
-                event_id=str(uuid4()),
+                event_id=event_id,
                 event_type=event_type,
                 occurred_at=now,
                 camera_id=camera.camera_id,
@@ -675,7 +800,8 @@ class CameraManager:
                     bounding_box=detection.normalized_box(width, height),
                 ),
                 zone_id=zone_id,
-                details=details or {},
+                details=event_details,
+                evidence=evidence,
             )
         )
 
@@ -694,3 +820,42 @@ def _image_detection(
         plate_text=plate_text,
         ocr_confidence=ocr_confidence,
     )
+
+
+def _video_activity_predictions(events: list[AnalyticsEvent]) -> list[ActivityPrediction]:
+    predictions: list[ActivityPrediction] = []
+    activity_evidence = {
+        "virtual_fence_intrusion": "tracked object entered a restricted zone",
+        "loitering": "tracked object remained in a zone for the configured duration",
+        "night_movement": "tracked movement occurred during the configured night window",
+        "crowding": "three or more people were detected together",
+        "stopped_vehicle": "a tracked vehicle remained nearly stationary for at least 10 seconds",
+    }
+    for activity, evidence in activity_evidence.items():
+        matches = [event for event in events if event.event_type == activity]
+        if matches:
+            predictions.append(ActivityPrediction(activity=activity, confidence=None, evidence=f"{len(matches)} event(s); {evidence}"))
+    return predictions
+
+
+def _aggregate_plate_events(events: list[AnalyticsEvent]) -> list[AnalyticsEvent]:
+    """Keep the strongest OCR observation for each plate read across video frames."""
+    best_by_plate: dict[str, AnalyticsEvent] = {}
+    non_plate_events: list[AnalyticsEvent] = []
+    for event in events:
+        if event.event_type != "plate_read":
+            non_plate_events.append(event)
+            continue
+        plate = str(event.details.get("plate_text") or "").upper()
+        if not plate:
+            non_plate_events.append(event)
+            continue
+        current = best_by_plate.get(plate)
+        current_confidence = current.details.get("ocr_confidence") if current else -1
+        confidence = event.details.get("ocr_confidence")
+        if current is None or (
+            isinstance(confidence, (int, float))
+            and (not isinstance(current_confidence, (int, float)) or confidence > current_confidence)
+        ):
+            best_by_plate[plate] = event
+    return non_plate_events + list(best_by_plate.values())

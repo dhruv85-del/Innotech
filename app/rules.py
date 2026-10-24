@@ -37,6 +37,8 @@ class RuleState:
         self.zone_entry: set[tuple[str, str]] = set()
         self.loiter_since: dict[tuple[str, str], datetime] = {}
         self.last_emitted: dict[tuple[str, str, str], datetime] = {}
+        self.last_centers: dict[str, tuple[float, float]] = {}
+        self.stationary_since: dict[str, datetime] = {}
 
     def should_emit(
         self,

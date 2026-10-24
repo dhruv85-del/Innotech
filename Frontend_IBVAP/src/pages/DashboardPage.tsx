@@ -1,14 +1,16 @@
 import { useState } from 'react'
 import { ArrowRight, ArrowUpRight, Clock3, FileVideo, Image, ShieldAlert, Upload } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { activity, initialAlerts, type UploadedMedia } from '../data'
+import { activity, type UploadedMedia } from '../data'
 import { PageTitle, StatCard, StatusBadge } from '../components/Primitives'
 import { useAppContext } from '../App'
 
 const alertColors: Record<string, string> = { Critical: 'alert-marker-critical', High: 'alert-marker-high', Medium: 'alert-marker-medium', Low: 'alert-marker-low' }
 
 function ActivityChart() {
-  const points = activity.map((value, index) => `${index * (300 / (activity.length - 1))},${100 - value}`).join(' ')
+  const points = activity.length > 1
+    ? activity.map((value, index) => `${index * (300 / (activity.length - 1))},${100 - value}`).join(' ')
+    : '0,100 300,100'
   return <div className="chart-wrap">
     <div className="chart-y-labels"><span>100</span><span>75</span><span>50</span><span>25</span><span>0</span></div>
     <div className="chart-main">
@@ -33,8 +35,13 @@ export function DashboardPage({ media }: { media: UploadedMedia[] }) {
   const { cameras, events, readiness } = useAppContext()
   const [range, setRange] = useState('Last 24 hours')
   const recentMedia = media.slice(0, 4)
+  const recentEvents = events.slice(0, 4)
+  const today = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }).format(new Date())
+  const greeting = new Intl.DateTimeFormat(undefined, { hour: 'numeric', hour12: false }).format(new Date())
+  const hour = Number(greeting)
+  const salutation = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
   return <div className="page">
-    <PageTitle eyebrow="WEDNESDAY, OCTOBER 21, 2026" title="Good afternoon, Jordan" description="Review uploaded videos, images, and flagged items in your workspace." action={<button className="button button-secondary" onClick={() => setRange(range === 'Last 24 hours' ? 'Last 7 days' : 'Last 24 hours')}><Clock3 size={15} />{range}<span className="button-caret">⌄</span></button>} />
+    <PageTitle eyebrow={today.toUpperCase()} title={`${salutation}, Jordan`} description="Review uploaded videos, images, and flagged items in your workspace." action={<button className="button button-secondary" onClick={() => setRange(range === 'Last 24 hours' ? 'Last 7 days' : 'Last 24 hours')}><Clock3 size={15} />{range}<span className="button-caret">⌄</span></button>} />
     <section className="stats-grid">
       <StatCard label="Uploaded media" value={media.length.toString().padStart(2, '0')} icon={<Upload size={18} />} tone="cyan" note="Available in this session" />
       <StatCard label="Videos" value={media.filter((item) => item.kind === 'Video').length.toString().padStart(2, '0')} icon={<FileVideo size={18} />} tone="green" note="Uploaded video clips" />
@@ -44,7 +51,7 @@ export function DashboardPage({ media }: { media: UploadedMedia[] }) {
     <section className="dashboard-grid">
       <article className="panel activity-panel">
         <div className="panel-heading"><div><h2>Upload activity</h2><p>Files added to the workspace over time</p></div><div className="panel-heading-side"><span className="chart-legend"><i /> Uploads</span><button className="icon-button small-more" aria-label="Upload chart options">···</button></div></div>
-        <div className="chart-summary"><strong>36</strong><span className="positive-inline"><ArrowUpRight size={14} /> 8.4%</span><span className="muted-text">vs. previous period</span></div>
+        <div className="chart-summary"><strong>{media.length}</strong><span className="muted-text">files in this session</span></div>
         <ActivityChart />
       </article>
       <article className="panel map-panel upload-summary-panel">
@@ -54,8 +61,12 @@ export function DashboardPage({ media }: { media: UploadedMedia[] }) {
     </section>
     <section className="dashboard-grid lower-grid">
       <article className="panel alerts-panel">
-        <div className="panel-heading"><div><h2>Recent alerts <span className="heading-count">{initialAlerts.filter((alert) => alert.status === 'New').length}</span></h2><p>Flagged items for manual review</p></div><Link to="/alerts" className="text-link">View all <ArrowRight size={14} /></Link></div>
-        <div className="recent-alerts">{initialAlerts.slice(0, 4).map((alert) => <div className="recent-alert" key={alert.id}><span className={`alert-marker ${alertColors[alert.severity]}`}><ShieldAlert size={15} /></span><div className="recent-alert-content"><div className="alert-title-row"><strong>{alert.title}</strong><StatusBadge status={alert.severity} /></div><p>{alert.media} <span>·</span> {alert.time}</p></div><ArrowUpRight size={15} className="alert-open-icon" /></div>)}</div>
+        <div className="panel-heading"><div><h2>Recent alerts <span className="heading-count">{events.length}</span></h2><p>Flagged items for manual review</p></div><Link to="/alerts" className="text-link">View all <ArrowRight size={14} /></Link></div>
+        <div className="recent-alerts">{recentEvents.map((event) => {
+          const severity = event.event_type.includes('intrusion') ? 'Critical' : 'Medium'
+          return <div className="recent-alert" key={event.event_id}><span className={`alert-marker ${alertColors[severity]}`}><ShieldAlert size={15} /></span><div className="recent-alert-content"><div className="alert-title-row"><strong>{event.event_type.replace(/_/g, ' ')}</strong><StatusBadge status={severity} /></div><p>{event.camera_id} <span>·</span> {new Date(event.occurred_at).toLocaleString()}</p></div><ArrowUpRight size={15} className="alert-open-icon" /></div>
+        })}</div>
+        {!recentEvents.length && <div className="table-empty">No service events yet.</div>}
       </article>
       <article className="panel camera-status-panel recent-uploads-panel">
         <div className="panel-heading"><div><h2>Recent uploads</h2><p>Latest videos and images</p></div><Link to="/uploads" className="text-link">View all <ArrowRight size={14} /></Link></div>
