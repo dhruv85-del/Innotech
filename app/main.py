@@ -109,11 +109,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @router.get("/cameras", response_model=list[CameraStatus])
     def list_cameras(request: Request) -> list[CameraStatus]:
-        return request.app.state.camera_manager.list()
+        return request.app.state.camera_manager.list_cameras()
 
     @router.get("/metrics/cameras", response_model=list[CameraMetrics])
     def camera_metrics(request: Request) -> list[CameraMetrics]:
-        return request.app.state.camera_manager.metrics()
+        return request.app.state.camera_manager.metric_snapshots()
 
     @router.get("/cameras/{camera_id}", response_model=CameraStatus)
     def get_camera(camera_id: str, request: Request) -> CameraStatus:

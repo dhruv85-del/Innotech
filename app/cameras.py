@@ -111,7 +111,7 @@ class CameraRuntime:
                 total_inference_ms=round(self.total_inference_ms, 3),
             )
 
-    def metrics(self) -> CameraMetrics:
+    def metric_snapshot(self) -> CameraMetrics:
         with self.lock:
             average = (
                 self.total_inference_ms / self.inference_count
@@ -225,15 +225,15 @@ class CameraManager:
             self.start(config.camera_id)
         return runtime.status()
 
-    def list(self) -> list[CameraStatus]:
+    def list_cameras(self) -> list[CameraStatus]:
         with self._lock:
             cameras = list(self._cameras.values())
         return [camera.status() for camera in cameras]
 
-    def metrics(self) -> list[CameraMetrics]:
+    def metric_snapshots(self) -> list[CameraMetrics]:
         with self._lock:
             cameras = list(self._cameras.values())
-        return [camera.metrics() for camera in cameras]
+        return [camera.metric_snapshot() for camera in cameras]
 
     def get(self, camera_id: str) -> CameraRuntime:
         with self._lock:
