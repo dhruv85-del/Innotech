@@ -34,7 +34,7 @@ export function useAppContext() {
 export default function App() {
   const [media, setMedia] = useState(initialMedia)
   const [token, setTokenState] = useState(
-    () => sessionStorage.getItem('ibvap-api-token') ?? 'ibvap-local-20261022-7f4d9a2c8e1b6a0d3f5c7b9e2a4d6f8c'
+    () => sessionStorage.getItem('ibvap-api-token') ?? ''
   )
   const [readiness, setReadiness] = useState<Readiness | null>(null)
   const [cameras, setCameras] = useState<CameraStatus[]>([])

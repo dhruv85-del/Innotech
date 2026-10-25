@@ -72,11 +72,13 @@ export class ApiError extends Error {
   }
 }
 
+const API_BASE_URL = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '')
+
 async function request<T>(path: string, options: RequestInit = {}, token: string): Promise<T> {
   const headers = new Headers(options.headers)
   headers.set('X-API-Key', token)
   if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json')
-  const response = await fetch(path, { ...options, headers })
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers })
   if (!response.ok) {
     let message = `Request failed with HTTP ${response.status}.`
     try {
@@ -102,21 +104,21 @@ export const api = {
       body: JSON.stringify({ event_id: eventId, status, acted_at: new Date().toISOString() }),
     }, token),
   eventSnapshot: async (token: string, eventId: string) => {
-    const response = await fetch(`/api/v1/events/${encodeURIComponent(eventId)}/snapshot`, {
+    const response = await fetch(`${API_BASE_URL}/api/v1/events/${encodeURIComponent(eventId)}/snapshot`, {
       headers: { 'X-API-Key': token },
     })
     if (!response.ok) throw new ApiError(response.status, 'Snapshot unavailable')
     return response.blob()
   },
   imageReport: async (token: string, reportId: string) => {
-    const response = await fetch(`/api/v1/image-reports/${encodeURIComponent(reportId)}/download`, {
+    const response = await fetch(`${API_BASE_URL}/api/v1/image-reports/${encodeURIComponent(reportId)}/download`, {
       headers: { 'X-API-Key': token },
     })
     if (!response.ok) throw new ApiError(response.status, 'Image report unavailable')
     return response.blob()
   },
   videoReport: async (token: string, reportId: string) => {
-    const response = await fetch(`/api/v1/video-reports/${encodeURIComponent(reportId)}/download`, {
+    const response = await fetch(`${API_BASE_URL}/api/v1/video-reports/${encodeURIComponent(reportId)}/download`, {
       headers: { 'X-API-Key': token },
     })
     if (!response.ok) throw new ApiError(response.status, 'Video report unavailable')
